@@ -1,0 +1,92 @@
+[
+  {
+    "field": "request.headers.Accept-Language",
+    "pattern": "(?i)zh-CN",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad Accept-Language: zh-CN",
+    "tags": ["bad-lang"]
+  },
+  {
+    "field": "request.headers.Accept-Language",
+    "pattern": "(?i)\\bzh\\b",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad Accept-Language: plain zh",
+    "tags": ["bad-lang"]
+  },
+  {
+    "field": "request.headers.Accept-Language",
+    "pattern": "(?i)tr-TR",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad Accept-Language: tr-TR",
+    "tags": ["bad-lang"]
+  },
+  {
+    "field": "request.headers.Accept-Language",
+    "pattern": "(?i)\\btr\\b",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad Accept-Language: plain tr",
+    "tags": ["bad-lang"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)\\bbot\\b",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Any user-agent containing 'bot' as a word",
+    "tags": ["bot"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)(zh-cn|zh-Hans-CN)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad User-Agent: zh-cn / zh-Hans-CN",
+    "tags": ["bad-ua"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)(OpenHarmony|com\\.huawei\\.hmos\\.browser)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad User-Agent: OpenHarmony / HMOS Browser",
+    "tags": ["bad-ua"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)okhttp",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Bad User-Agent: okhttp",
+    "tags": ["bad-ua"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)(baidu|googlebot|bingbot|yandex|duckduckbot|facebot|twitterbot|slurp|mj12bot|ahrefsbot|semrush|dotbot|rogerbot|seznambot|petalbot|bytespider|claudebot|anthropic|gptbot|omgili|opensiteexplorer|searchbot|bot |crawler|spider|scraper|archive|linkwalker|uptimerobot|monitoring)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Known bot/crawler UA",
+    "tags": ["bot", "crawler"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)/search\\?q=site(%3A|:)[a-zA-Z0-9.-]+\\.[a-z]{2,}(&|$)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Isolated site: search (no additional keywords)",
+    "tags": ["bot", "site-search"]
+  }
+]
