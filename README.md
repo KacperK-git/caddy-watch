@@ -12,6 +12,7 @@ Features:
 - **Dry‑run mode** - test rules safely without touching the firewall
 - **Audit history** - optional separate database logging every ban/unban decision
 - **Easy to extend** - rules are simple JSON files
+- **Management companion** - `caddy‑manage.py` for inspecting, testing, syncing, and manually unbanning IPs
 
 ---
 
@@ -46,6 +47,7 @@ Detection rules are defined in a JSON file (`rules.json` by default). The reposi
 
 You can point caddy‑watch to either file by changing `rules_file` in `config.json`, or merge them together as you like.
 
+
 ### Rule types
 
 There are two kinds of rules:
@@ -55,6 +57,7 @@ There are two kinds of rules:
 2. **Plain‑text rules** (`"type": "plaintext"`) - work on raw log lines (e.g. Caddy’s standard error log). The regex **must** include a named capture group `(?P<ip>…)` so the offending address can be extracted.
 
 Every rule defines a `threshold`, a time `window` (in seconds), and a `ban_duration` (0 = permanent). When a single IP reaches the threshold within the window, it gets blocked via nftables.
+
 
 ### Rule examples
 
@@ -146,6 +149,36 @@ Stop the process with `SIGINT` (Ctrl+C) or `SIGTERM`. It will shut down graceful
 3. Hits are stored in an SQLite database with sliding windows. When an IP crosses a threshold, it is immediately banned via `nftables`.
 4. A background thread periodically scans for expired bans and removes the corresponding firewall rules.
 5. Optionally, every ban/unban event is logged to a history database for auditing.
+
+---
+
+## Management tool (`caddy‑manage.py`)
+
+caddy‑watch ships with a companion script for day‑to‑day administration of the ban list.  
+It reads the same SQLite databases and talks directly to nftables, so it needs root privileges  
+(for commands that touch the firewall, prefix with `sudo`).
+
+| Command               | Description                                                      |
+|-----------------------|------------------------------------------------------------------|
+| `list`                | Show all active bans (oldest first) with reason and time remaining |
+| `stats`               | Display total bans, dropped packets/bytes per IP                 |
+| `test <IP>`           | Check if an IP is currently blocked (database + nftables)        |
+| `unban <IP>`          | Immediately remove a ban from both database and firewall         |
+| `sync [--repair]`     | Compare database and nftables, list inconsistencies. With `--repair` fix them automatically |
+| `history [--limit N]` | Show the last `N` rule hit events (default 20)                   |
+
+**Examples:**
+
+    sudo ./caddy-manage.py list
+    sudo ./caddy-manage.py test 45.33.32.156
+    sudo ./caddy-manage.py unban 45.33.32.156
+    sudo ./caddy-manage.py sync --repair
+    ./caddy-manage.py history --limit 50
+
+`list`, `stats`, `test` and `history` are safe to run without `sudo` *if* you only need database info,  
+but `stats` and `test` read live nftables counters which require root. When in doubt, use `sudo`.
+
+Note: `caddy‑manage.py` currently looks for `caddy-watch.db` in the same directory and reads `rules.json` to show rule descriptions in the `history` command. If you use a custom config, put the scripts and database in the same directory or symlink appropriately.
 
 ---
 
