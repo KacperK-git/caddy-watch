@@ -1,0 +1,191 @@
+[
+  {
+    "type": "plaintext",
+    "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: tls: unsupported SSLv2 handshake received",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "TLS – SSLv2 handshake attempt",
+    "tags": ["tls", "scan"]
+  },
+  {
+    "type": "plaintext",
+    "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: tls: client offered only unsupported versions: \\[.*?\\]",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "TLS – unsupported protocol versions offered",
+    "tags": ["tls", "scan"]
+  },
+  {
+    "type": "plaintext",
+    "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: no certificate available for '.*?'",
+    "threshold": 2,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "TLS – no certificate available (likely SNI scan)",
+    "tags": ["tls", "scan"]
+  },
+  {
+    "type": "plaintext",
+    "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: tls: first record does not look like a TLS handshake",
+    "threshold": 2,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "TLS – first record not a handshake (non-TLS traffic)",
+    "tags": ["tls", "scan"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)^https?://",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "User-Agent is a URL (likely scanner)",
+    "tags": ["bad-ua", "scanner"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)^$",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 604800,
+    "description": "Empty User-Agent header",
+    "tags": ["bad-ua"]
+  },
+  {
+    "field": "request.headers.User-Agent",
+    "pattern": "(?i)(sqlmap|nikto|nmap|masscan|nessus|openvas|acunetix|burpsuite|zgrab|gobuster|dirbuster|wpscan|python-requests|rootevidence|rootevidence/1|Go-http-client/1\\.1|Java/1\\.|CFNetwork|Apache-HttpClient|libwww-perl|curl/[0-9]+\\.[0-9]+\\.[0-9]+)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 86400,
+    "description": "Known scanner / offensive tool UA",
+    "tags": ["bad-ua", "tool"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)/(?:wp-admin|wp-login|wp-config|admin|config|\\.env|\\.git|phpmyadmin|mysql|dbadmin|actuator|solr|jenkins|\\.env\\.|\\.git/|console)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Path probing (admin, .env, etc.)",
+    "tags": ["scan", "uri"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)/(?:wap|imei|public|install|addons|dist_customer|api/system|api/seller|api/common|api/exchangerate|api/set|api/new-version|forerest|relayApi|market|portal/index/protocol|index/police|admin/webadmin|Public/Qts|Public/Mobile|Public/Home|wap/api|/1/1$)",
+    "threshold": 2,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Extended path scanning (dirbuster‑style probes)",
+    "tags": ["scan", "uri"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(select%20|union%20|insert%20|drop%20|update%20|delete%20|information_schema|%27|%22|--|\\bor\\b.*=|\\band\\b.*=)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "SQLi probe in URI",
+    "tags": ["exploit", "sqli"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(<script|<img|onerror=|onload=|javascript:|<svg|<iframe|alert\\()",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "XSS probe in URI",
+    "tags": ["exploit", "xss"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(\\.\\.\\/|\\.\\.%2f|\\.\\.%5c|/etc/passwd|/proc/self|/windows/win\\.ini|\\bwp-content\\b|\\bwp-includes\\b|/admin\\.php)",
+    "threshold": 2,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Path traversal / LFI probe",
+    "tags": ["exploit", "traversal"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(%2e%2e%2f|%2e%2e/|%2e%2e%5c|%252e%252e|%c0%ae%c0%ae|%uff0e%uff0e)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Advanced path traversal (double encoding, unicode bypasses)",
+    "tags": ["exploit", "traversal"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)([;&|`]\\s*(?:id|uname|whoami|ls|pwd|cat |wget |curl |chmod |base64|eval|exec|system)\\b|\\$\\(|`[a-z])",
+    "threshold": 2,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Command injection probe",
+    "tags": ["exploit", "cmdi"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(/xmlrpc\\.php|/wp-json/wp/v2/users|/wp-content/plugins/|/wp-content/themes/|/wp-admin/admin-ajax\\.php|/administrator/index\\.php|/joomla/|/magento/|/wp-content/plugins/hellopress/wp_filemanager\\.php|/this_is_a_new_hello_world\\.php)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "CMS‑specific probe",
+    "tags": ["exploit", "cms"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(/sites/default/|/misc/|/modules/|/index\\.php\\?option=com_|/administrator/index\\.php\\?option=)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Additional CMS probes (Drupal, Joomla components)",
+    "tags": ["exploit", "cms"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(\\$\\{|jndi:(ldap|rmi|dns|nis|iiop|corba|nds|http)://)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Log4Shell / JNDI injection attempt",
+    "tags": ["exploit", "log4shell"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)\\{\\{.*?\\}\\}|{%(.+?)%}|<#--|#\\{",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "SSTI (Server-Side Template Injection) probe",
+    "tags": ["exploit", "ssti"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(<!ENTITY|SYSTEM\\s+\"file://|xml/io|<!DOCTYPE)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "XXE / XML External Entity probe",
+    "tags": ["exploit", "xxe"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(/phpinfo\\.php|/info\\.php|/test\\.php|/pma/)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Info disclosure probes (phpinfo, phpMyAdmin)",
+    "tags": ["scan", "uri"]
+  },
+  {
+    "field": "request.uri",
+    "pattern": "(?i)(/server-status|/nginx_status|/php-fpm-status|/status\\?full|/actuator/health)",
+    "threshold": 1,
+    "window": 60,
+    "ban_duration": 7776000,
+    "description": "Server status & health endpoint probes",
+    "tags": ["scan", "uri"]
+  }
+]
