@@ -350,6 +350,8 @@ class RuleEngine:
         "request.uri",
         "request.headers.User-Agent",
         "request.headers.Accept-Language",
+        "status",
+        "resp_headers.Content-Type"
     )
 
     def __init__(self, rules_file: str):
