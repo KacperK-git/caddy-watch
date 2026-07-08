@@ -10,6 +10,16 @@
     "tags": ["rate-limit"]
   },
   {
+    "type": "json_access",
+    "field": "status",
+    "pattern": "^404$",
+    "threshold": 2,
+    "window": 10,
+    "ban_duration": 86400,
+    "description": "Excessive 404 responses (probing)",
+    "tags": ["scan", "status"]
+  },
+  {
     "type": "plaintext",
     "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: tls: unsupported SSLv2 handshake received",
     "threshold": 1,
