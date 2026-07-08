@@ -15,6 +15,7 @@ import argparse
 from datetime import datetime, timezone
 import queue
 import signal
+import socket
 
 
 def timestamp() -> str:
@@ -25,7 +26,7 @@ def load_config(config_path: str) -> dict:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_config = {
         "poll_interval": 5,
-        "unban_check_interval": 3600,
+        "unban_check_interval": 600,
         "container_name": "caddy",
         "log_path": None,                # None - auto-detect from Docker
         "history_db_enable": True,
@@ -136,125 +137,122 @@ class DecisionLogger:
 
 
 class NftablesManager:
-    """Create/manage a dedicated 'ban' chain in nftables for IPv4 and IPv6."""
+    """Create/manage a dedicated 'ban' chain and sets in nftables for IPv4 and IPv6."""
+
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
 
     def init_ban_chain(self):
-        """Ensure that ip/ip6 filter ban chain exists and is jumped to."""
-        self._ensure_chain_for_family("ip")
-        self._ensure_chain_for_family("ip6")
+        """Ensure that ip/ip6 filter ban chains and sets exist and are jumped to."""
+        self._ensure_chain_and_set("ip")
+        self._ensure_chain_and_set("ip6")
 
-    def _ensure_chain_for_family(self, family: str):
+    def _ensure_chain_and_set(self, family: str):
         if self.dry_run:
-            print(f"[SIMULATE] Setup nftables ban chain for {family}")
+            print(f"[SIMULATE] Setup nftables ban chain and sets for {family}")
             return
 
-        # create filter table if missing
-        subprocess.run(
-            ["nft", "add", "table", family, "filter"],
-            capture_output=True, text=True,
-        )
-        # create input/forward base chains with hooks if missing
+        set_name = "banned_ipv4" if family == "ip" else "banned_ipv6"
+        addr_type = "ipv4_addr" if family == "ip" else "ipv6_addr"
+
+        # 1. Create filter table if missing
+        subprocess.run(["nft", "add", "table", family, "filter"], capture_output=True)
+
+        # 2. Create input/forward base chains with hooks if missing
         for chain, hook, prio in [("input", "input", "0"), ("forward", "forward", "0")]:
             check = subprocess.run(
                 ["nft", "list", "chain", family, "filter", chain],
-                capture_output=True, text=True,
+                capture_output=True
             )
             if check.returncode != 0:
-                subprocess.run(
-                    ["nft", "add", "chain", family, "filter", chain,
-                     "{", "type", "filter", "hook", hook, "priority", f"{prio};",
-                     "policy", "accept;", "}"],
-                    capture_output=True, text=True,
-                )
+                subprocess.run([
+                    "nft", "add", "chain", family, "filter", chain,
+                    "{", "type", "filter", "hook", hook, "priority", f"{prio};",
+                    "policy", "accept;", "}"
+                ], capture_output=True)
 
-        # Check if ban chain already exists (locale-independent)
-        list_result = subprocess.run(
+        # 3. Ensure the SET exists with timeout support
+        subprocess.run([
+            "nft", "add", "set", family, "filter", set_name,
+            "{", "type", addr_type + ";", "flags", "timeout;", "}"
+        ], capture_output=True)
+
+        # 4. Ensure ban chain exists
+        check_chain = subprocess.run(
             ["nft", "list", "chain", family, "filter", "ban"],
-            capture_output=True, text=True,
+            capture_output=True
         )
-        if list_result.returncode != 0:
-            # Chain does not exist - create it
-            create_result = subprocess.run(
-                ["nft", "add", "chain", family, "filter", "ban"],
-                capture_output=True, text=True,
-            )
-            if create_result.returncode != 0:
-                print(f"[{timestamp()}] ERROR: nft create ban chain failed ({family}): "
-                      f"{create_result.stderr.strip()}", file=sys.stderr)
-                return
+        if check_chain.returncode != 0:
+            subprocess.run(["nft", "add", "chain", family, "filter", "ban"], capture_output=True)
 
-        # flush existing rules (clean slate after reboot)
-        subprocess.run(
-            ["nft", "flush", "chain", family, "filter", "ban"],
-            capture_output=True, text=True,
-        )
+        # 5. Flush existing rules in the ban chain (Wipes out old legacy O(N) rules!)
+        subprocess.run(["nft", "flush", "chain", family, "filter", "ban"], capture_output=True)
 
-        # ensure jump from input and forward chains
+        # 6. Add the single O(1) set-based drop rule
+        addr_key = "ip saddr" if family == "ip" else "ip6 saddr"
+        subprocess.run([
+            "nft", "add", "rule", family, "filter", "ban",
+            addr_key, "@" + set_name, "counter", "drop"
+        ], capture_output=True)
+
+        # 7. Ensure jump from input and forward base chains to the ban chain
         for base_chain in ("input", "forward"):
             chain_check = subprocess.run(
                 ["nft", "list", "chain", family, "filter", base_chain],
-                capture_output=True, text=True,
+                capture_output=True, text=True
             )
-            if "jump ban" in chain_check.stdout:
-                continue
-            insert = subprocess.run(
-                ["nft", "insert", "rule", family, "filter", base_chain,
-                 "position", "1", "jump", "ban"],
-                capture_output=True, text=True,
-            )
-            if insert.returncode != 0:
-                subprocess.run(
-                    ["nft", "add", "rule", family, "filter", base_chain, "jump", "ban"],
-                    capture_output=True, text=True,
-                )
+            if "jump ban" not in chain_check.stdout:
+                insert = subprocess.run([
+                    "nft", "insert", "rule", family, "filter", base_chain,
+                    "position", "1", "jump", "ban"
+                ], capture_output=True)
+                if insert.returncode != 0:
+                    subprocess.run([
+                        "nft", "add", "rule", family, "filter", base_chain, "jump", "ban"
+                    ], capture_output=True)
 
     def ban_ip(self, ip: str, duration: int = 0):
-        """Add a drop rule for *ip* to the appropriate ban chain."""
+        """Add an IP to the appropriate nftables set with an optional timeout."""
         family = "ip6" if ":" in ip else "ip"
+        set_name = "banned_ipv6" if family == "ip6" else "banned_ipv4"
+
         if self.dry_run:
-            addr = "ip6 saddr" if family == "ip6" else "ip saddr"
-            print(f"[SIMULATE] nft add rule {family} filter ban {addr} {ip} counter drop")
+            timeout_str = f" timeout {duration}s" if duration > 0 else ""
+            print(f"[SIMULATE] nft add element {family} filter {set_name} {{ {ip}{timeout_str} }}")
             return
-        print(f"[{timestamp()}] Banning IP {ip} (nftables {family} filter ban)")
-        try:
-            subprocess.run(
-                ["nft", "add", "rule", family, "filter", "ban",
-                 "ip" if family == "ip" else "ip6", "saddr", ip, "counter", "drop"],
-                check=True, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"[{timestamp()}] ERROR: nft ban failed: {e.stderr.strip()}", file=sys.stderr)
+
+        print(f"[{timestamp()}] Banning IP {ip} (nftables {family} set {set_name})")
+
+        # Build the command payload
+        cmd = ["nft", "add", "element", family, "filter", set_name, "{", ip]
+        if duration > 0:
+            cmd.extend(["timeout", f"{duration}s"])
+        cmd.append("}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # Safely ignore "File exists" if the IP is already in the set
+        if result.returncode != 0 and "File exists" not in result.stderr:
+            print(f"[{timestamp()}] ERROR: nft ban failed: {result.stderr.strip()}", file=sys.stderr)
 
     def unban_ip(self, ip: str):
-        """Remove the drop rule for *ip* from the appropriate ban chain."""
+        """Remove an IP from the appropriate nftables set."""
         family = "ip6" if ":" in ip else "ip"
+        set_name = "banned_ipv6" if family == "ip6" else "banned_ipv4"
+
         if self.dry_run:
-            print(f"[SIMULATE] remove nft ban rule for IP {ip} ({family})")
+            print(f"[SIMULATE] nft delete element {family} filter {set_name} {{ {ip} }}")
             return
-        print(f"[{timestamp()}] Unbanning IP {ip} from nftables {family} filter ban")
-        try:
-            result = subprocess.run(
-                ["nft", "-a", "list", "chain", family, "filter", "ban"],
-                capture_output=True, text=True, check=True,
-            )
-            addr_key = "ip6 saddr" if family == "ip6" else "ip saddr"
 
-            # Regex: matches the addr_key, spaces, exact IP, and then either whitespace or line end
-            pattern = re.compile(rf"{addr_key}\s+{re.escape(ip)}(?:\s|$)")
+        print(f"[{timestamp()}] Unbanning IP {ip} from nftables set {set_name}")
 
-            for line in result.stdout.splitlines():
-                if pattern.search(line) and "drop" in line:
-                    handle = line.split("handle")[-1].strip()
-                    if handle.isdigit():
-                        subprocess.run(
-                            ["nft", "delete", "rule", family, "filter", "ban", "handle", handle],
-                            check=True, capture_output=True, text=True,
-                        )
-                        print(f"[{timestamp()}] Removed ban rule for {ip} (handle {handle})")
-        except subprocess.CalledProcessError as e:
-            print(f"[{timestamp()}] ERROR: nft unban failed: {e.stderr.strip()}", file=sys.stderr)
+        result = subprocess.run([
+            "nft", "delete", "element", family, "filter", set_name, "{", ip, "}"
+        ], capture_output=True, text=True)
+
+        # Ignore errors if the element was already removed by the kernel's native timeout
+        if result.returncode != 0 and "does not exist" not in result.stderr and "No such file" not in result.stderr:
+            print(f"[{timestamp()}] ERROR: nft unban failed: {result.stderr.strip()}", file=sys.stderr)
 
 
 class Database:
@@ -493,6 +491,34 @@ class LogDetector:
         except subprocess.CalledProcessError as e:
             print(f"[{timestamp()}] ERROR: docker inspect failed: {e}", file=sys.stderr)
             sys.exit(1)
+
+
+def start_ping_listener(socket_path):
+    """Starts a non-blocking background thread to reply to caddy-manage ping requests."""
+    if os.path.exists(socket_path):
+        try:
+            os.unlink(socket_path)
+        except OSError:
+            pass
+
+    def listener():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(socket_path)
+            s.listen(5)
+            # Ensure the management script can read/write to the socket if running under different users
+            os.chmod(socket_path, 0o666)
+            while True:
+                try:
+                    conn, _ = s.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        if data == b"ping":
+                            conn.sendall(b"pong!")
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=listener, daemon=True)
+    t.start()
 
 
 class CaddyWatch:
@@ -806,6 +832,10 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="config.json",
                         help="Path to JSON configuration file (default: config.json)")
     args = parser.parse_args()
+
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    SOCKET_PATH = os.path.join(SCRIPT_DIR, "caddy-watch.sock")
+    start_ping_listener(SOCKET_PATH)
 
     watcher = CaddyWatch(args)
     watcher.run()

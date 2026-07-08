@@ -1,6 +1,6 @@
 {
     "poll_interval": 5,
-    "unban_check_interval": 3600,
+    "unban_check_interval": 600,
     "container_name": "caddy",
     "log_path": null,
     "history_db_enable": true,

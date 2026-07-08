@@ -4,24 +4,26 @@ caddy-manage - advanced management for caddy-watch bans.
 Commands:
   list             List active bans (oldest first)
   sync             Compare database vs nftables, optionally repair
-  stats            Show total bans and dropped packets/bytes from nftables
+  stats            Show total bans and dropped packets/bytes from nftables sets
   test <IP>        Check if an IP is currently banned
-  unban <IP>       Remove a ban from database and nftables
-  history          Show recent hits (rule triggers) - last 20
+  unban <IP>       Remove a ban from database and nftables sets
+  history          Show rule hits from the last N hours (default 3)     <--- CURRENTLY NOT WORKING
+  ping             Verify the core script is alive and responding
 """
 
 import os
 import re
 import sys
+import socket
 import sqlite3
 import subprocess
 import time
 import argparse
 from datetime import datetime, timezone
 
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "caddy-watch.db")
+SOCKET_PATH = os.path.join(SCRIPT_DIR, "caddy-watch.sock")
 
 
 def format_duration(seconds):
@@ -43,78 +45,72 @@ def format_duration(seconds):
     parts.append(f"{secs}s")
     return " ".join(parts)
 
-def get_ban_chain_ips(family):
-    """Return set of IP addresses currently in the given nftables ban chain."""
+
+def get_ban_set_ips(family):
+    """Return set of IP addresses currently in the given nftables ban set."""
     try:
         output = subprocess.run(
-            ["nft", "list", "chain", family, "filter", "ban"],
+            ["nft", "list", "set", family, "filter", "ban"],
             capture_output=True, text=True, check=True
         ).stdout
     except subprocess.CalledProcessError:
         return set()
+
     ips = set()
-    keyword = "ip6 saddr " if family == "ip6" else "ip saddr "
-    for line in output.splitlines():
-        if keyword in line and "drop" in line:
-            # Extract IP between keyword and " counter"
-            parts = line.split(keyword, 1)
-            if len(parts) > 1:
-                rest = parts[1]
-                ip = rest.split(" counter", 1)[0].strip()
+    # Isolating items listed inside elements = { ... }
+    match = re.search(r'elements\s*=\s*\{([^}]+)\}', output)
+    if not match:
+        return ips
+
+    for item in match.group(1).split(","):
+        tokens = item.strip().split()
+        if tokens:
+            ip = tokens[0]
+            if "." in ip or ":" in ip:
                 ips.add(ip)
     return ips
 
-def get_ban_chain_counters(family):
-    """Return dict IP -> (packets, bytes) from the ban chain."""
+
+def get_ban_set_counters(family):
+    """Return dict IP -> (packets, bytes) from the ban set elements."""
     counters = {}
     try:
         output = subprocess.run(
-            ["nft", "list", "chain", family, "filter", "ban"],
+            ["nft", "list", "set", family, "filter", "ban"],
             capture_output=True, text=True, check=True
         ).stdout
     except subprocess.CalledProcessError:
         return counters
 
-    keyword = "ip6 saddr " if family == "ip6" else "ip saddr "
-    for line in output.splitlines():
-        if keyword not in line or "drop" not in line:
-            continue
-        # Extract IP
-        _, after_keyword = line.split(keyword, 1)
-        parts = after_keyword.split(None, 1)   # split on whitespace: first token is IP
-        ip = parts[0]
-        # The rest contains "counter packets X bytes Y drop …"
-        rest = parts[1] if len(parts) > 1 else ""
-        # Find packets and bytes using regex
-        pkt_match = re.search(r'packets\s+(\d+)', rest)
-        bytes_match = re.search(r'bytes\s+(\d+)', rest)
-        packets = int(pkt_match.group(1)) if pkt_match else 0
-        byt = int(bytes_match.group(1)) if bytes_match else 0
-        counters[ip] = (packets, byt)
+    match = re.search(r'elements\s*=\s*\{([^}]+)\}', output)
+    if not match:
+        return counters
+
+    for item in match.group(1).split(","):
+        tokens = item.strip().split()
+        if tokens:
+            ip = tokens[0]
+            if "." in ip or ":" in ip:
+                pkt_match = re.search(r'packets\s+(\d+)', item)
+                bytes_match = re.search(r'bytes\s+(\d+)', item)
+                packets = int(pkt_match.group(1)) if pkt_match else 0
+                byt = int(bytes_match.group(1)) if bytes_match else 0
+                counters[ip] = (packets, byt)
     return counters
 
+
 def unban_ip(ip: str):
-    """Remove the nftables rule for the given IP."""
+    """Remove the IP from the nftables ban set."""
     family = "ip6" if ":" in ip else "ip"
     try:
-        result = subprocess.run(
-            ["nft", "-a", "list", "chain", family, "filter", "ban"],
-            capture_output=True, text=True, check=True
+        subprocess.run(
+            ["nft", "delete", "element", family, "filter", "ban", f"{{ {ip} }}"],
+            check=True, capture_output=True, text=True
         )
-        for line in result.stdout.splitlines():
-            addr_keyword = "ip6 saddr" if family == "ip6" else "ip saddr"
-            if f"{addr_keyword} {ip}" in line and "drop" in line:
-                handle = line.split("handle")[-1].strip()
-                if handle.isdigit():
-                    subprocess.run(
-                        ["nft", "delete", "rule", family, "filter",
-                         "ban", "handle", handle],
-                        check=True, capture_output=True, text=True
-                    )
-                    return True
-        return False
+        return True
     except subprocess.CalledProcessError:
         return False
+
 
 def load_rules():
     """Return list of rules from rules.json (same format as caddy-watch.py)."""
@@ -126,6 +122,7 @@ def load_rules():
         return rules
     return []
 
+
 def get_active_bans(conn):
     """Return list of (ip, unban_time, rule_desc) for bans not yet expired."""
     now = time.time()
@@ -134,6 +131,7 @@ def get_active_bans(conn):
         (now,)
     )
     return cur.fetchall()
+
 
 def remove_ban(conn, ip):
     conn.execute("DELETE FROM bans WHERE ip = ?", (ip,))
@@ -158,38 +156,38 @@ def cmd_list(conn):
         remaining = unban_time - now if unban_time != float("inf") else float("inf")
         remaining_str = format_duration(remaining)
         if len(rule_desc) > reason_col - 2:
-            rule_desc = rule_desc[:reason_col-5] + "..."
+            rule_desc = rule_desc[:reason_col - 5] + "..."
         print(f"{ip:<{ip_col}} {remaining_str:<{remaining_col}} {rule_desc:<{reason_col}}")
 
     print("-" * len(header))
     print(f"{len(bans)} active bans in total\n")
 
+
 def cmd_sync(conn, repair=False):
-    """Check consistency between DB and nftables, optionally fix."""
+    """Check consistency between DB and nftables sets, optionally fix."""
     now = time.time()
     db_ips = {row[0] for row in conn.execute("SELECT ip FROM bans WHERE unban_time > ?", (now,))}
-    nft_v4 = get_ban_chain_ips("ip")
-    nft_v6 = get_ban_chain_ips("ip6")
+    nft_v4 = get_ban_set_ips("ip")
+    nft_v6 = get_ban_set_ips("ip6")
     all_nft = nft_v4 | nft_v6
 
     missing_in_nft = db_ips - all_nft
     orphan_in_nft = all_nft - db_ips
 
     if not missing_in_nft and not orphan_in_nft:
-        print("✅ Database and nftables are in sync.")
+        print("✅ Database and nftables sets are in sync.")
         return
 
     if missing_in_nft:
-        print(f"⚠️  IPs in database but missing from nftables ({len(missing_in_nft)}):")
+        print(f"⚠️  IPs in database but missing from nftables sets ({len(missing_in_nft)}):")
         for ip in sorted(missing_in_nft):
             print(f"   {ip}")
         if repair:
-            print("Adding missing nftables rules...")
+            print("Adding missing nftables set elements...")
             for ip in sorted(missing_in_nft):
                 family = "ip6" if ":" in ip else "ip"
                 subprocess.run(
-                    ["nft", "add", "rule", family, "filter", "ban",
-                     "ip6" if family == "ip6" else "ip", "saddr", ip, "counter", "drop"],
+                    ["nft", "add", "element", family, "filter", "ban", f"{{ {ip} }}"],
                     capture_output=True, text=True
                 )
                 print(f"   ➕ Added {ip}")
@@ -197,33 +195,35 @@ def cmd_sync(conn, repair=False):
             print("   Run with --repair to fix automatically.")
 
     if orphan_in_nft:
-        print(f"⚠️  IPs in nftables but missing from database ({len(orphan_in_nft)}):")
+        print(f"⚠️  IPs in nftables sets but missing from database ({len(orphan_in_nft)}):")
         for ip in sorted(orphan_in_nft):
             print(f"   {ip}")
         if repair:
-            print("Removing orphan nftables rules...")
+            print("Removing orphan nftables elements...")
             for ip in sorted(orphan_in_nft):
                 if unban_ip(ip):
                     print(f"   🗑️  Removed {ip}")
         else:
             print("   Run with --repair to remove them.")
 
+
 def cmd_stats(conn):
     bans = get_active_bans(conn)
     print(f"Active bans in database: {len(bans)}")
 
-    v4_counters = get_ban_chain_counters("ip")
-    v6_counters = get_ban_chain_counters("ip6")
+    v4_counters = get_ban_set_counters("ip")
+    v6_counters = get_ban_set_counters("ip6")
     all_counters = {**v4_counters, **v6_counters}
     total_packets = sum(pkt for pkt, _ in all_counters.values())
     total_bytes = sum(byt for _, byt in all_counters.values())
-    print(f"Total dropped packets (since rule creation): {total_packets}")
+    print(f"Total dropped packets (since element addition): {total_packets}")
     print(f"Total dropped bytes: {total_bytes}")
-    # Show per‑IP counters if any
+
     if all_counters:
         print("\nPer‑IP packet/byte counters:")
         for ip, (pkt, byt) in sorted(all_counters.items()):
             print(f"   {ip}: {pkt} packets, {byt} bytes")
+
 
 def cmd_test(conn, ip):
     """Check if an IP is currently banned (database + nftables)."""
@@ -241,13 +241,14 @@ def cmd_test(conn, ip):
         print("📋 Database: not banned (or ban expired)")
 
     family = "ip6" if ":" in ip else "ip"
-    nft_ips = get_ban_chain_ips(family)
+    nft_ips = get_ban_set_ips(family)
     if ip in nft_ips:
-        counters = get_ban_chain_counters(family)
+        counters = get_ban_set_counters(family)
         pkt, byt = counters.get(ip, (0, 0))
-        print(f"🔒 nftables: BLOCKED ({pkt} packets, {byt} bytes dropped)")
+        print(f"🔒 nftables set: BLOCKED ({pkt} packets, {byt} bytes dropped)")
     else:
-        print(f"🔓 nftables: not blocked")
+        print(f"🔓 nftables set: not blocked")
+
 
 def cmd_unban(conn, ip):
     cur = conn.execute("SELECT ip FROM bans WHERE ip = ?", (ip,))
@@ -257,35 +258,60 @@ def cmd_unban(conn, ip):
     success = unban_ip(ip)
     remove_ban(conn, ip)
     if success:
-        print(f"✅ IP {ip} unblocked (nftables rule removed).")
+        print(f"✅ IP {ip} unblocked (nftables element removed).")
     else:
-        print(f"⚠️  No nftables rule found, but IP removed from database.")
+        print(f"⚠️  No nftables set element found, but IP removed from database.")
 
-def cmd_history(conn, limit=20):
-    """Show recent rule hit entries with rule description."""
-    cur = conn.execute(
-        "SELECT ip, rule_id, timestamp FROM rule_hits ORDER BY timestamp DESC LIMIT ?",
-        (limit,)
-    )
-    rows = cur.fetchall()
-    if not rows:
-        print("No rule hit history yet.")
+
+# def cmd_history(conn, hours=3.0):
+#     """Show rule hit entries within the last N hours."""
+#     now = time.time()
+#     cutoff_timestamp = now - (hours * 3600)
+#
+#     cur = conn.execute(
+#         "SELECT ip, rule_id, timestamp FROM rule_hits WHERE timestamp >= ? ORDER BY timestamp DESC",
+#         (cutoff_timestamp,)
+#     )
+#     rows = cur.fetchall()
+#     if not rows:
+#         print(f"No rule hit history within the last {hours} hours.")
+#         return
+#
+#     rules = load_rules()
+#     print(f"Rule hits within the last {hours} hours (newest first, total: {len(rows)}):")
+#     print(f"{'Time':<22} {'IP':<20} {'Rule Description'}")
+#     print("-" * 70)
+#     for ip, rule_id, ts in rows:
+#         time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+#         desc = ""
+#         if 0 <= rule_id < len(rules):
+#             desc = rules[rule_id].get("description", f"Rule {rule_id}")
+#         else:
+#             desc = f"Unknown rule {rule_id}"
+#         if len(desc) > 45:
+#             desc = desc[:42] + "..."
+#         print(f"{time_str:<22} {ip:<20} {desc}")
+
+
+def cmd_ping():
+    """Send a ping to the running caddy-watch daemon via UNIX domain socket."""
+    if not os.path.exists(SOCKET_PATH):
+        print("❌ Connection socket missing. Is the core caddy-watch process running?")
         return
-
-    rules = load_rules()
-    print(f"Last {len(rows)} rule hits (newest first):")
-    print(f"{'Time':<22} {'IP':<20} {'Rule Description'}")
-    print("-" * 70)
-    for ip, rule_id, ts in rows:
-        time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        desc = ""
-        if 0 <= rule_id < len(rules):
-            desc = rules[rule_id].get("description", f"Rule {rule_id}")
-        else:
-            desc = f"Unknown rule {rule_id}"
-        if len(desc) > 45:
-            desc = desc[:42] + "..."
-        print(f"{time_str:<22} {ip:<20} {desc}")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(SOCKET_PATH)
+            client.sendall(b"ping")
+            response = client.recv(1024).decode("utf-8").strip()
+            if response == "pong!":
+                print("🏓 pong! (Core script is active and responding)")
+            else:
+                print(f"⚠️ Received unexpected response: {response}")
+    except socket.timeout:
+        print("❌ Ping timed out. The core script might be frozen.")
+    except Exception as e:
+        print(f"❌ Failed to reach core script: {e}")
 
 
 def main():
@@ -311,10 +337,13 @@ def main():
     unban_parser = sub.add_parser("unban", help="Remove a ban for an IP")
     unban_parser.add_argument("ip", help="IP address")
 
-    # history
-    hist_parser = sub.add_parser("history", help="Show recent rule hit logs")
-    hist_parser.add_argument("--limit", type=int, default=20,
-                             help="Number of entries (default 20)")
+    # history (BROKEN)
+    # hist_parser = sub.add_parser("history", help="Show rule hit logs from the last N hours")
+    # hist_parser.add_argument("--hours", type=float, default=3.0,
+    #                          help="Number of hours of history to display (default: 3)")
+
+    # ping
+    sub.add_parser("ping", help="Ping the main process to check health status")
 
     args = parser.parse_args()
 
@@ -339,12 +368,15 @@ def main():
         cmd_test(conn, args.ip)
     elif args.command == "unban":
         cmd_unban(conn, args.ip)
-    elif args.command == "history":
-        cmd_history(conn, limit=args.limit)
+    # elif args.command == "history":
+    #     cmd_history(conn, hours=args.hours)
+    elif args.command == "ping":
+        cmd_ping()
     else:
         parser.print_help()
 
     conn.close()
+
 
 if __name__ == "__main__":
     main()
