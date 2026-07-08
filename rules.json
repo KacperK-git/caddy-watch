@@ -82,15 +82,6 @@
   },
   {
     "field": "request.uri",
-    "pattern": "(?i)(select%20|union%20|insert%20|drop%20|update%20|delete%20|information_schema|%27|%22|--|\\bor\\b.*=|\\band\\b.*=)",
-    "threshold": 1,
-    "window": 60,
-    "ban_duration": 7776000,
-    "description": "SQLi probe in URI",
-    "tags": ["exploit", "sqli"]
-  },
-  {
-    "field": "request.uri",
     "pattern": "(?i)(<script|<img|onerror=|onload=|javascript:|<svg|<iframe|alert\\()",
     "threshold": 1,
     "window": 60,
