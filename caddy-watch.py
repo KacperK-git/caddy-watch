@@ -240,8 +240,12 @@ class NftablesManager:
                 capture_output=True, text=True, check=True,
             )
             addr_key = "ip6 saddr" if family == "ip6" else "ip saddr"
+
+            # Regex: matches the addr_key, spaces, exact IP, and then either whitespace or line end
+            pattern = re.compile(rf"{addr_key}\s+{re.escape(ip)}(?:\s|$)")
+
             for line in result.stdout.splitlines():
-                if f"{addr_key} {ip}" in line and "drop" in line:
+                if pattern.search(line) and "drop" in line:
                     handle = line.split("handle")[-1].strip()
                     if handle.isdigit():
                         subprocess.run(
@@ -750,12 +754,22 @@ class CaddyWatch:
                         with open(self.log_path, "rb") as f:
                             f.seek(self.last_offset)
                             raw = f.read(current_size - self.last_offset)
+                            # Temporarily update offset to the end of the current read
                             self.last_offset = f.tell()
 
-                        lines = raw.decode("utf-8", errors="replace").splitlines()
-                        for line in lines:
+                        # keepends=True is critical here so we can check for '\n'
+                        lines = raw.decode("utf-8", errors="replace").splitlines(keepends=True)
+
+                        for i, line in enumerate(lines):
+                            # If this is the last line in the chunk and it lacks a newline, it's incomplete
+                            if i == len(lines) - 1 and not line.endswith('\n'):
+                                # Rewind the offset by the byte length of this partial string
+                                self.last_offset -= len(line.encode("utf-8"))
+                                break
+
                             try:
-                                self._process_line(line)
+                                # Strip the trailing newline before processing
+                                self._process_line(line.strip())
                             except Exception as e:
                                 self._log_error(f"Failed to process line: {e}")
 
