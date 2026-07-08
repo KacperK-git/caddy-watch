@@ -1,5 +1,15 @@
 [
   {
+    "type": "json_access",
+    "field": "request.uri",
+    "pattern": ".*",
+    "threshold": 250,
+    "window": 10,
+    "ban_duration": 3600,
+    "description": "Rate limit: more than 250 requests in 10s",
+    "tags": ["rate-limit"]
+  },
+  {
     "type": "plaintext",
     "pattern": "TLS handshake error from (?P<ip>\\S+):\\d+: tls: unsupported SSLv2 handshake received",
     "threshold": 1,
