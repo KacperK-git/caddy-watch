@@ -13,7 +13,7 @@
     "type": "json_access",
     "field": "status",
     "pattern": "^404$",
-    "threshold": 2,
+    "threshold": 10,
     "window": 10,
     "ban_duration": 86400,
     "description": "Excessive 404 responses (probing)",
