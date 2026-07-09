@@ -7,7 +7,7 @@ Commands:
   stats            Show total bans and dropped packets/bytes from nftables sets
   test <IP>        Check if an IP is currently banned
   unban <IP>       Remove a ban from database and nftables sets
-  history          Show rule hits from the last N hours (default 3)     <--- CURRENTLY NOT WORKING
+  history          Show rule hits from the last N hours (default 3)
   ping             Verify the core script is alive and responding
 """
 
@@ -23,13 +23,14 @@ from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "caddy-watch.db")
+HISTORY_DB_PATH = os.path.join(SCRIPT_DIR, "caddy-watch-history.db")
 SOCKET_PATH = os.path.join(SCRIPT_DIR, "caddy-watch.sock")
 
 
 def format_duration(seconds):
     if seconds < 0:
         return "expired"
-    if seconds == float("inf"):
+    if seconds == float("inf") or seconds == 0:
         return "permanent"
     days = int(seconds // 86400)
     hours = int((seconds % 86400) // 3600)
@@ -42,15 +43,17 @@ def format_duration(seconds):
         parts.append(f"{hours}h")
     if minutes > 0:
         parts.append(f"{minutes}m")
-    parts.append(f"{secs}s")
+    if secs > 0 or not parts:
+        parts.append(f"{secs}s")
     return " ".join(parts)
 
 
 def get_ban_set_ips(family):
     """Return set of IP addresses currently in the given nftables ban set."""
+    set_name = "banned_ipv4" if family == "ip" else "banned_ipv6"
     try:
         output = subprocess.run(
-            ["nft", "list", "set", family, "filter", "ban"],
+            ["nft", "list", "set", family, "filter", set_name],
             capture_output=True, text=True, check=True
         ).stdout
     except subprocess.CalledProcessError:
@@ -74,9 +77,10 @@ def get_ban_set_ips(family):
 def get_ban_set_counters(family):
     """Return dict IP -> (packets, bytes) from the ban set elements."""
     counters = {}
+    set_name = "banned_ipv4" if family == "ip" else "banned_ipv6"
     try:
         output = subprocess.run(
-            ["nft", "list", "set", family, "filter", "ban"],
+            ["nft", "list", "set", family, "filter", set_name],
             capture_output=True, text=True, check=True
         ).stdout
     except subprocess.CalledProcessError:
@@ -102,9 +106,10 @@ def get_ban_set_counters(family):
 def unban_ip(ip: str):
     """Remove the IP from the nftables ban set."""
     family = "ip6" if ":" in ip else "ip"
+    set_name = "banned_ipv6" if family == "ip6" else "banned_ipv4"
     try:
         subprocess.run(
-            ["nft", "delete", "element", family, "filter", "ban", f"{{ {ip} }}"],
+            ["nft", "delete", "element", family, "filter", set_name, f"{{ {ip} }}"],
             check=True, capture_output=True, text=True
         )
         return True
@@ -140,27 +145,97 @@ def remove_ban(conn, ip):
 
 def cmd_list(conn):
     bans = get_active_bans(conn)
-    if not bans:
-        print("No active bans.")
-        return
+    line_width = 50  # Default separator line width if no bans exist
 
-    ip_col = 20
-    reason_col = 50
-    remaining_col = 20
-    header = f"{'IP':<{ip_col}} {'Remaining':<{remaining_col}} {'Reason':<{reason_col}}"
-    print(header)
-    print("-" * len(header))
+    # 1. Print Active Bans Table if any exist
+    if bans:
+        ip_col = 20
+        reason_col = 50
+        remaining_col = 20
+        header = f"{'IP':<{ip_col}} {'Remaining':<{remaining_col}} {'Reason':<{reason_col}}"
+        line_width = len(header)
+        print(header)
+        print("-" * line_width)
 
-    now = time.time()
-    for ip, unban_time, rule_desc in bans:
-        remaining = unban_time - now if unban_time != float("inf") else float("inf")
-        remaining_str = format_duration(remaining)
-        if len(rule_desc) > reason_col - 2:
-            rule_desc = rule_desc[:reason_col - 5] + "..."
-        print(f"{ip:<{ip_col}} {remaining_str:<{remaining_col}} {rule_desc:<{reason_col}}")
+        now = time.time()
+        for ip, unban_time, rule_desc in bans:
+            remaining = unban_time - now if unban_time != float("inf") else float("inf")
+            remaining_str = format_duration(remaining)
+            if len(rule_desc) > reason_col - 2:
+                rule_desc = rule_desc[:reason_col - 5] + "..."
+            print(f"{ip:<{ip_col}} {remaining_str:<{remaining_col}} {rule_desc:<{reason_col}}")
+    else:
+        print("No active bans currently in the database.")
 
-    print("-" * len(header))
-    print(f"{len(bans)} active bans in total\n")
+    # 2. Gather additional active metrics
+    ipv4_count = sum(1 for row in bans if ":" not in row[0])
+    ipv6_count = sum(1 for row in bans if ":" in row[0])
+    perm_count = sum(1 for row in bans if row[1] == float("inf"))
+
+    # 3. Gather historical database metrics
+    hist_db_path = os.path.join(SCRIPT_DIR, "caddy-watch-history.db")
+    bans_per_hour_24h = 0.0
+    unbans_per_hour_24h = 0.0
+    total_historical_bans = 0
+
+    if os.path.exists(hist_db_path):
+        try:
+            with sqlite3.connect(hist_db_path) as h_conn:
+                now_ts = time.time()
+                day_ago = now_ts - 86400
+
+                # Rolling 24h ban rate
+                cur = h_conn.execute(
+                    "SELECT COUNT(*) FROM decisions WHERE action = 'ban' AND timestamp >= ?",
+                    (day_ago,)
+                )
+                bans_per_hour_24h = cur.fetchone()[0] / 24.0
+
+                # Rolling 24h unban rate
+                cur = h_conn.execute(
+                    "SELECT COUNT(*) FROM decisions WHERE action = 'unban' AND timestamp >= ?",
+                    (day_ago,)
+                )
+                unbans_per_hour_24h = cur.fetchone()[0] / 24.0
+
+                # Lifetime total bans
+                cur = h_conn.execute("SELECT COUNT(*) FROM decisions WHERE action = 'ban'")
+                total_historical_bans = cur.fetchone()[0]
+        except Exception:
+            # Fallback gracefully if history database is temporarily locked or unreadable
+            pass
+
+    # 4. Calculate Net Growth Rate and Database Pool Trend
+    growth_rate_24h = bans_per_hour_24h - unbans_per_hour_24h
+
+    if growth_rate_24h >= 0.1:
+        trend_str = "▲"
+    elif growth_rate_24h >= 0.05:
+        trend_str = "🡥"
+    elif growth_rate_24h <= -0.1:
+        trend_str = "▽"
+    elif growth_rate_24h <= -0.05:
+        trend_str = "🡦"
+    else:
+        trend_str = "-"
+
+    print("-" * line_width)
+
+    # 5. Print Summary Metrics Block
+    print("\n📊 Metrics:")
+    print(f"  • IPv4 bans:              {ipv4_count}")
+    print(f"  • IPv6 bans:              {ipv6_count}")
+    print(f"  • Persistent bans:        {perm_count}")
+    print(f"  • Ban Rate:               {bans_per_hour_24h:.2f}  /h (last 24h)")
+    print(f"  • Unban Rate:             {unbans_per_hour_24h:.2f}  /h (last 24h)")
+    print(f"  • Net Growth Rate:        {growth_rate_24h:+.2f} /h ({trend_str})")
+    print(f"  • All bans ever issued:   {total_historical_bans}\n")
+
+    if bans:
+        print(f"{len(bans)} current active bans")
+        print()
+    print("-" * line_width)
+    print()
 
 
 def cmd_sync(conn, repair=False):
@@ -186,8 +261,9 @@ def cmd_sync(conn, repair=False):
             print("Adding missing nftables set elements...")
             for ip in sorted(missing_in_nft):
                 family = "ip6" if ":" in ip else "ip"
+                set_name = "banned_ipv6" if family == "ip6" else "banned_ipv4"
                 subprocess.run(
-                    ["nft", "add", "element", family, "filter", "ban", f"{{ {ip} }}"],
+                    ["nft", "add", "element", family, "filter", set_name, f"{{ {ip} }}"],
                     capture_output=True, text=True
                 )
                 print(f"   ➕ Added {ip}")
@@ -207,7 +283,7 @@ def cmd_sync(conn, repair=False):
             print("   Run with --repair to remove them.")
 
 
-def cmd_stats(conn):
+def cmd_stats(conn, top_n=10):
     bans = get_active_bans(conn)
     print(f"Active bans in database: {len(bans)}")
 
@@ -220,9 +296,19 @@ def cmd_stats(conn):
     print(f"Total dropped bytes: {total_bytes}")
 
     if all_counters:
-        print("\nPer‑IP packet/byte counters:")
-        for ip, (pkt, byt) in sorted(all_counters.items()):
-            print(f"   {ip}: {pkt} packets, {byt} bytes")
+        print(f"\nTop {top_n} Blocked IPs by Bytes:")
+        print(f"   {'IP':<20} {'Packets':<12} {'Bytes':<15}")
+        print("   " + "-" * 50)
+        sorted_by_bytes = sorted(all_counters.items(), key=lambda x: x[1][1], reverse=True)[:top_n]
+        for ip, (pkt, byt) in sorted_by_bytes:
+            print(f"   {ip:<20} {pkt:<12} {byt:<15}")
+
+        print(f"\nTop {top_n} Blocked IPs by Packets:")
+        print(f"   {'IP':<20} {'Packets':<12} {'Bytes':<15}")
+        print("   " + "-" * 50)
+        sorted_by_packets = sorted(all_counters.items(), key=lambda x: x[1][0], reverse=True)[:top_n]
+        for ip, (pkt, byt) in sorted_by_packets:
+            print(f"   {ip:<20} {pkt:<12} {byt:<15}")
 
 
 def cmd_test(conn, ip):
@@ -263,34 +349,43 @@ def cmd_unban(conn, ip):
         print(f"⚠️  No nftables set element found, but IP removed from database.")
 
 
-# def cmd_history(conn, hours=3.0):
-#     """Show rule hit entries within the last N hours."""
-#     now = time.time()
-#     cutoff_timestamp = now - (hours * 3600)
-#
-#     cur = conn.execute(
-#         "SELECT ip, rule_id, timestamp FROM rule_hits WHERE timestamp >= ? ORDER BY timestamp DESC",
-#         (cutoff_timestamp,)
-#     )
-#     rows = cur.fetchall()
-#     if not rows:
-#         print(f"No rule hit history within the last {hours} hours.")
-#         return
-#
-#     rules = load_rules()
-#     print(f"Rule hits within the last {hours} hours (newest first, total: {len(rows)}):")
-#     print(f"{'Time':<22} {'IP':<20} {'Rule Description'}")
-#     print("-" * 70)
-#     for ip, rule_id, ts in rows:
-#         time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-#         desc = ""
-#         if 0 <= rule_id < len(rules):
-#             desc = rules[rule_id].get("description", f"Rule {rule_id}")
-#         else:
-#             desc = f"Unknown rule {rule_id}"
-#         if len(desc) > 45:
-#             desc = desc[:42] + "..."
-#         print(f"{time_str:<22} {ip:<20} {desc}")
+def cmd_history(history_db_path, hours=3.0):
+    """Show ban/unban history entries within the last N hours from the history DB."""
+    if not os.path.exists(history_db_path):
+        print(f"❌ History database not found at {history_db_path}.")
+        return
+
+    conn = sqlite3.connect(history_db_path)
+    now = time.time()
+    cutoff_timestamp = now - (hours * 3600)
+
+    try:
+        cur = conn.execute(
+            "SELECT ip, action, rule_desc, duration, timestamp FROM decisions WHERE timestamp >= ? ORDER BY timestamp DESC",
+            (cutoff_timestamp,)
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"❌ Error reading history database: {e}")
+        conn.close()
+        return
+    finally:
+        conn.close()
+
+    if not rows:
+        print(f"No history within the last {hours} hours.")
+        return
+
+    print(f"History within the last {hours} hours (newest first, total: {len(rows)}):")
+    print(f"{'Time':<22} {'IP':<20} {'Action':<8} {'Duration':<12} {'Reason/Description'}")
+    print("-" * 90)
+    for ip, action, rule_desc, duration, ts in rows:
+        time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        dur_str = format_duration(duration) if action == "ban" else "-"
+        desc = rule_desc
+        if len(desc) > 30:
+            desc = desc[:27] + "..."
+        print(f"{time_str:<22} {ip:<20} {action.upper():<8} {dur_str:<12} {desc}")
 
 
 def cmd_ping():
@@ -327,7 +422,9 @@ def main():
                              help="Automatically fix inconsistencies")
 
     # stats
-    sub.add_parser("stats", help="Show ban statistics and dropped traffic")
+    stats_parser = sub.add_parser("stats", help="Show ban statistics and dropped traffic")
+    stats_parser.add_argument("--top", type=int, default=10,
+                             help="Number of top blocked IPs to show (default: 10)")
 
     # test
     test_parser = sub.add_parser("test", help="Check if an IP is currently banned")
@@ -337,10 +434,10 @@ def main():
     unban_parser = sub.add_parser("unban", help="Remove a ban for an IP")
     unban_parser.add_argument("ip", help="IP address")
 
-    # history (BROKEN)
-    # hist_parser = sub.add_parser("history", help="Show rule hit logs from the last N hours")
-    # hist_parser.add_argument("--hours", type=float, default=3.0,
-    #                          help="Number of hours of history to display (default: 3)")
+    # history
+    hist_parser = sub.add_parser("history", help="Show ban/unban logs from the last N hours")
+    hist_parser.add_argument("--hours", type=float, default=3.0,
+                             help="Number of hours of history to display (default: 3)")
 
     # ping
     sub.add_parser("ping", help="Ping the main process to check health status")
@@ -363,13 +460,13 @@ def main():
     elif args.command == "sync":
         cmd_sync(conn, repair=args.repair)
     elif args.command == "stats":
-        cmd_stats(conn)
+        cmd_stats(conn, top_n=args.top)
     elif args.command == "test":
         cmd_test(conn, args.ip)
     elif args.command == "unban":
         cmd_unban(conn, args.ip)
-    # elif args.command == "history":
-    #     cmd_history(conn, hours=args.hours)
+    elif args.command == "history":
+        cmd_history(HISTORY_DB_PATH, hours=args.hours)
     elif args.command == "ping":
         cmd_ping()
     else:
