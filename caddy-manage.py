@@ -206,34 +206,38 @@ def cmd_list(conn):
             pass
 
     # 4. Calculate Net Growth Rate and Database Pool Trend
-    growth_rate_24h = bans_per_hour_24h - unbans_per_hour_24h
+    growth_rate = bans_per_hour_24h - unbans_per_hour_24h
 
-    if growth_rate_24h >= 0.1:
+    if growth_rate >= 1.0:
         trend_str = "▲"
-    elif growth_rate_24h >= 0.05:
+    elif growth_rate >= 0.5:
         trend_str = "🡥"
-    elif growth_rate_24h <= -0.1:
-        trend_str = "▽"
-    elif growth_rate_24h <= -0.05:
+    elif growth_rate >= 0.25:
+        trend_str = "▴"
+    elif growth_rate <= -0.25:
+        trend_str = "▾"
+    elif growth_rate <= -0.5:
         trend_str = "🡦"
+    elif growth_rate <= -1.0:
+        trend_str = "▽"
     else:
         trend_str = "-"
+
+    trend_str *= 3
 
     print("-" * line_width)
 
     # 5. Print Summary Metrics Block
     print("\n📊 Metrics:")
+    print(f"  • All active bans:        {len(bans)}")
     print(f"  • IPv4 bans:              {ipv4_count}")
     print(f"  • IPv6 bans:              {ipv6_count}")
     print(f"  • Persistent bans:        {perm_count}")
-    print(f"  • Ban Rate:               {bans_per_hour_24h:.2f}  /h (last 24h)")
-    print(f"  • Unban Rate:             {unbans_per_hour_24h:.2f}  /h (last 24h)")
-    print(f"  • Net Growth Rate:        {growth_rate_24h:+.2f} /h ({trend_str})")
+    print(f"  • Ban Rate:               {bans_per_hour_24h:.2f}  /h (last 24 h)")
+    print(f"  • Unban Rate:             {unbans_per_hour_24h:.2f}  /h (last 24 h)")
+    print(f"  • Net Growth Rate:        {growth_rate:+.2f} /h (   {trend_str}   )")
     print(f"  • All bans ever issued:   {total_historical_bans}\n")
 
-    if bans:
-        print(f"{len(bans)} current active bans")
-        print()
     print("-" * line_width)
     print()
 
