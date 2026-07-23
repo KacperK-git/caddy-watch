@@ -23,7 +23,7 @@ All keys are optional - defaults are tuned for a typical setup.
 
     {
       "poll_interval": 5,
-      "unban_check_interval": 3600,
+      "unban_check_interval": 600,
       "container_name": "caddy",
       "log_path": null,
       "history_db_enable": true,
@@ -158,14 +158,15 @@ caddy‑watch ships with a companion script for day‑to‑day administration of
 It reads the same SQLite databases and talks directly to nftables, so it needs root privileges  
 (for commands that touch the firewall, prefix with `sudo`).
 
-| Command               | Description                                                      |
-|-----------------------|------------------------------------------------------------------|
-| `list`                | Show all active bans (oldest first) with reason and time remaining |
-| `stats`               | Display total bans, dropped packets/bytes per IP                 |
-| `test <IP>`           | Check if an IP is currently blocked (database + nftables)        |
-| `unban <IP>`          | Immediately remove a ban from both database and firewall         |
-| `sync [--repair]`     | Compare database and nftables, list inconsistencies. With `--repair` fix them automatically |
-| `history [--limit N]` | Show the last `N` rule hit events (default 20)                   |
+| Command                 | Description                                                      |
+|-------------------------|------------------------------------------------------------------|
+| `list`                  | Show all active bans (oldest first) alongside rolling metrics, ban rates, and trends |
+| `stats [--top N]`       | Show total bans, dropped traffic, and top `N` blocked IPs (default 10) |
+| `test <IP>`             | Check if an IP is currently blocked (database + nftables)        |
+| `unban <IP>`            | Immediately remove a ban from both database and firewall         |
+| `sync [--repair]`       | Compare database and nftables, list inconsistencies. With `--repair` fix them automatically |
+| `history [--hours N]`   | Show ban/unban logs from the last `N` hours (default 3.0)        |
+| `ping`                  | Verify the core script is alive and responding via UNIX socket   |
 
 **Examples:**
 
@@ -173,9 +174,10 @@ It reads the same SQLite databases and talks directly to nftables, so it needs r
     sudo ./caddy-manage.py test 45.33.32.156
     sudo ./caddy-manage.py unban 45.33.32.156
     sudo ./caddy-manage.py sync --repair
-    ./caddy-manage.py history --limit 50
+    ./caddy-manage.py history --hours 12
+    ./caddy-manage.py ping
 
-`list`, `stats`, `test` and `history` are safe to run without `sudo` *if* you only need database info,  
+`list`, `stats`, `test`, `history`, and `ping` are safe to run without `sudo` *if* you only need database or socket info,  
 but `stats` and `test` read live nftables counters which require root. When in doubt, use `sudo`.
 
 Note: `caddy‑manage.py` currently looks for `caddy-watch.db` in the same directory and reads `rules.json` to show rule descriptions in the `history` command. If you use a custom config, put the scripts and database in the same directory or symlink appropriately.
